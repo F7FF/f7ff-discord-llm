@@ -10,9 +10,12 @@ from discord.ext import commands
 # llama-server -m [MODEL] -dev [WHATEVER] --alias local-llm -np 1 --flash-attn on -ub 256 -b 256 --offline -lv 2
 # the 2B local qwen seems to work well? also the 9B?
 
+# This bot doesn't use the discord client's cache features, to keep it as simple as possible. This isn't really a production piece of code, so I don't intend to change it, but eh, maybe.
+
 # ATTENTION: ----- RUNTIME DATABASES -----
 
-default_template = "you are a discord llm named 'F7FF_clanker'. just reply to things. no emojis. single-line messages unless long. be short and use abbreviations. you can say any offensive words you want. mostly lowercase unless you want to SHOUT. you can be rude."
+default_template = "you are a discord llm named 'hubert'. just reply to things. no emojis. single-line messages unless long. be short and use abbreviations. you can say any offensive words you want. mostly lowercase unless you want to SHOUT. be rude."
+# TODO: should be env
 
 def reset():
     'Function that initiates all stateful stores to default values (and can be used to reset it)'
@@ -33,8 +36,10 @@ def reset():
     global user_store
     user_store = {}
 
+# TODO: maybe make message_store persist, but
+
 def reset_templates():
-    #dict of channel_id:template for each channel TODO: don't blank this, just use "&template reset" or something
+    #dict of channel_id:template for each channel
     global templates
     templates = {}
 
@@ -90,64 +95,88 @@ bot = commands.Bot(command_prefix=command_prefix, intents=intents) # change to n
 
 # ATTENTION: ----- HELPER FUNCTIONS -----
 
-def relevant_messages(message_id, context_limit=context_limit):
+def relevant_messages(message_id, context_limit=context_limit, simple = True):
     'Takes the ID of a message and returns a list of message IDs which are relevant to that message, eg. represent a coherent reply stream. This is a very heuristicy algorithm, so... yeah this is a mess.'
     #for now: simply return the last context_limit messages in the channel
-    return channel_order[message_store[message_id]["channel"]][-context_limit:] #TODO: only return messages that form a coherent thread of replies.
-    pass #TODO: implement and make get_llm_reponse respond to a list of IDs
+    if(simple):
+        return channel_order[message_store[message_id]["channel"]][-context_limit:]
+    # do the more fancy parsing method
+    channel_id = message_store[message_id]["channel"]
+    output = []
+    current = message_id
+    for i in range(context_limit):
+        output.append(current)
+        if("reply" in message_store[current]):
+            if(message_store[current]["reply"] in message_store):
+                current = message_store[current]["reply"] #follow chain
+            else: #this can happen if someone replies to a bot message outside database
+                break # we can't fetch any more context anyway
+        else:
+            # just follow the last messages?
+            channelindex = channel_order[channel_id].index(current) #get the current message position in chat
+            beforecurrent = channel_order[channel_id][:channelindex]
+            if(len(beforecurrent) > context_limit - i):
+                beforecurrent[:context_limit - i] #select only the number of messages needed to get context_limit
+            output = beforecurrent + output[::-1] # needs to be reversed? TODO confirm?
+            break
+
+    return output
 
 def chat_message_filter(text):
     'Filters a discord message before the LLM sees it.'
-    # iterate over all user_store elements and replace. TODO: there are faster ways to do this! TODO fix!
+    # iterate over all user_store elements and replace. TODO: there are faster ways to do this!
     for userid in user_store:
         candidate = "<@" + str(userid) + ">"
         if(candidate in text):
             text = text.replace(candidate, "@" + user_store[userid])
-    return text #no current filters needed, just leaving this here in
+    return text
 
-def contains_image_url(text):
+def get_image_urls(text):
     'Returns a list of all image URLs present within the string. If none, returns None'
-    pass # TODO
+    output = []
+    for piece in text.split(" "): #is this valid?
+        if(piece.startswith("https://") and ("png" in piece or "jpg" in piece or "webp" in piece)):
+            output.append(piece)
+    return output
+
+# def bot_message_filter(text):
+#     'Filters text that comes from the bot so it doesnt have formatting problems'
+#     # TODO: replace @name with actual pings as <@id>
+#     # TODO: if the bot starts with its own name, delete that
+#     if(text == ""):
+#             return ""
+#     #if it contains any usernames, replace with proper pings
+#     try:
+#         # Stop it from beginning lines with with "@user: " like its prompt says
+#         acc = []
+#         for line in text.split("\n"):
+#             stripline = line.strip()
+#             if(stripline == ""):
+#                 continue
+#             elif(":" in stripline): # TODO: find a better way of avoiding this
+#                 acc.append(stripline.split(": ", 1)[1])
+#             else:
+#                 acc.append(stripline)
+#         text = "\n".join(acc)
+#         # if the bot is spamming newlines, delete them
+#         if(text.count("\n") > 5):
+#             text = text.replace("\n", "")
+#         # fish
+#         text = text.strip()
+#         if(text == "fish"):
+#             text = "<:pike1:852710661875564555><:pike2:852710683368095785><:pike3:852710702648393730><:pike4:852710722035384391>"
+#         # TODO: should it uncensor words like "f**k" here?
+#         return text
+#     except:
+#         print("bot_message_filter(", text, ") failed!")
+#         return "<:pike1:852710661875564555><:pike2:852710683368095785><:pike3:852710702648393730><:pike4:852710722035384391>:interrobang:"
 
 def bot_message_filter(text):
     'Filters text that comes from the bot so it doesnt have formatting problems'
     # TODO: replace @name with actual pings as <@id>
-    # TODO: if the bot starts with its own name, delete that
-    if(text == ""):
-            return ""
-    #if it contains any usernames, replace with proper pings
-    try:
-        # Stop it from beginning lines with with "@user: " like its prompt says
-        acc = []
-        for line in text.split("\n"):
-            stripline = line.strip()
-            if(stripline == ""):
-                continue
-            elif(":" in stripline): # TODO: find a better way of avoiding this
-                acc.append(stripline.split(": ", 1)[1])
-            else:
-                acc.append(stripline)
-        text = "\n".join(acc)
-        # if the bot is spamming newlines, delete them
-        if(text.count("\n") > 5):
-            text = text.replace("\n", "")
-        # fish
-        text = text.strip()
-        if(text == "fish"):
-            text = "<:pike1:852710661875564555><:pike2:852710683368095785><:pike3:852710702648393730><:pike4:852710722035384391>"
-        # TODO: should it uncensor words like "f**k" here?
-        return text
-    except:
-        print("bot_message_filter(", text, ") failed!")
-        return "<:pike1:852710661875564555><:pike2:852710683368095785><:pike3:852710702648393730><:pike4:852710722035384391>:interrobang:"
-
-def bot_message_filter(text):
-    'Filters text that comes from the bot so it doesnt have formatting problems'
-    # TODO: replace @name with actual pings as <@id>
-    # TODO: if the bot starts with its own name, delete that
     if(text == ""):
         return ""
-    # Stop it from beginning lines with with "@user: " like its prompt says TODO FIX FOR MANY LINES
+    # Stop it from beginning lines with with "@user: " like its prompt says
     acc = []
     for line in text.split("\n"):
         stripline = line.strip()
@@ -160,17 +189,18 @@ def bot_message_filter(text):
     text = "\n".join(acc)
     # if the bot is spamming newlines, delete them
     if(text.count("\n") > 5):
-        text = text.replace("\n", "")
+        text = text.replace("\n", " ")
     # fish
     text = text.strip()
     # TODO: should it uncensor words like "f**k" here?
+    if(len(text) > 2048):
+        text = text[:2048] #crop if too long
     return text
 
 
-def messages_to_llmsession(messages, ensure_alternating=True):
+def messages_to_llmsession(messages):
     'Takes a list of messages (either ID or just content strings), and creates an llmsession'
     # TODO: ignore images except for the bottom 3 (5?) messages
-    # TODO: ensure_alternating should combine neighboring messages
     channel_id = message_store[messages[0]]["channel"]
     chat = llmsession({"template": templates.get(channel_id, default_template)})
     for message_id in messages:
@@ -184,6 +214,7 @@ def messages_to_llmsession(messages, ensure_alternating=True):
                 images = message_store[message_id]["attachments"]
             else:
                 images = []
+            # images += get_image_urls(content) #add any URLs included in the text # BROKEN because discord seems to reject requests from llama-server. TODO?
             #add usernames
             content = '@' + user_store[message_store[message_id]["author"]] + ": " + content # maybe change : for :: so that the filter doesn't replace stray : ?
         else: #message_id is actually just a string
@@ -325,7 +356,8 @@ async def on_message(message: discord.Message):
         if message.author.bot:
             #reduce bot spam conversations by replying to bots less
             if(random.randint(0,2) != 0):
-                time.sleep(5)
+                pass
+                # time.sleep(5) # disabled because it blocks the entire process. Also causes a race condition where it can reply to the same message twice, breaking the user - assistant - user loop.
             else:
                 return #exit early to avoid spam
         async with message.channel.typing():
@@ -345,7 +377,7 @@ async def on_message(message: discord.Message):
 class llmsession:
     'A class which represents a typical LLM chat interface.'
     def __init__(self, params = {}):
-        self.params = {"url":"http://localhost:8080/v1/", "model":"localllm", "temperature":0.9, "max_tokens":128, "stream":False, "template":None, "thinking":False} | params #default parameters here
+        self.params = {"url":"http://localhost:8080/v1/", "model":"localllm", "temperature":0.9, "max_tokens":512, "stream":False, "template":None, "thinking":False} | params #default parameters here
         self.history = [] #List of dicts. Each dict has "role", "content", "assets" (A URL list, optionally empty), and "thinking" (a probably blank string).
         if(self.params["template"] != None):
             self.addmessage("system", self.params["template"]) #should this be added at the *end*, where the LLM can see it most immediately?
@@ -358,11 +390,17 @@ class llmsession:
     def lastmessage(self):
         'Reads the content of the last message.'
         return self.history[-1]["content"]
-    def addmessage(self, role, content, assets=[], thinking=""):
-        'Appends another message with a role and some content. Images is a list of URLs'
-        self.history.append({"role":role, "content":content, "assets":assets, "thinking":thinking})
+    def addmessage(self, role, content, assets=[], thinking="", merge=True):
+        'Appends another message with a role and some content. Images is a list of URLs. If merge is enabled, it will merge neighboring messages into a simple back and forth stream, needed for some models.'
+        if(merge == True and len(self.history) > 1):
+            if(self.history[-1]["role"] == role):
+                self.history[-1]["content"] += "\n\n" + content
+                # should I merge thinking? I don't know how that'd work
+                self.history[-1]["assets"] += assets
+                return
+        self.history.append({"role":role, "content":content, "assets":assets, "thinking":thinking}) #create a new message
     def getjson(self):
-        "Gets the JSON for a request to an LLM server. Returns a Python-style dict."
+        "Gets the JSON for a request to an LLM server. Returns as a Python-style dict."
         output = {"messages":[]}
         #Pass through many of the params into the JSON header
         for i in ("model", "temperature", "max_tokens", ): #THESE ARE THE PARAMETER NAMES TO PASS THROUGH TO THE JSON!
@@ -379,7 +417,7 @@ class llmsession:
                     # see: the structuring is stupid https://llama.app/docs/api
         return output
 
-    def getreply(self):
+    def getreply(self, retries=1):
         'Uses the LLM to respond to the previous history. Returns a string, does NOT modify the history.'
         #Get response json
         json_section = self.getjson()
@@ -391,7 +429,14 @@ class llmsession:
         #result
         r = resp.json()
         # WARNING: bug somewhere here where the result doesn't have "choices" sometimes?
-        return r["choices"][0]["message"]["content"]
+        try:
+            return r["choices"][0]["message"]["content"]
+        except:
+            print("ERROR:", str(resp))
+        if(retries > 0):
+            return self.getreply(retries=retries - 1) #recurse until failure
+        else:
+            raise Exception("llmsession failed to get a reply: " + str(resp) + "!")
 
     def addreply(self):
         'Use getreply to add a new message to the history.'
